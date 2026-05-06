@@ -107,10 +107,21 @@ function Invoke-OhMyPoshTheme {
                 $newContent = @($profileContent) + $initLine
             }
 
-            Set-Content -Path $PROFILE -Value $newContent
-            Write-Host "  ✓ Profile updated ($PROFILE)" -ForegroundColor Green
-            Write-Host ""
-            Write-Host "  Reload now: . `$PROFILE" -ForegroundColor Yellow
+            try {
+                Set-Content -Path $PROFILE -Value $newContent -Encoding UTF8 -ErrorAction Stop
+                $written = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
+                if ($written -notmatch [regex]::Escape($themeName)) {
+                    throw "Read-back check failed — write silently blocked (check Windows Defender / antivirus)"
+                }
+                Write-Host "  ✓ Profile updated: $PROFILE" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "  Reload now: . `$PROFILE" -ForegroundColor Yellow
+            } catch {
+                Write-Host "  ✗ Could not write to profile: $_" -ForegroundColor Red
+                Write-Host "    Profile path: $PROFILE" -ForegroundColor DarkGray
+                Write-Host "    Run manually to apply (this session only):" -ForegroundColor DarkGray
+                Write-Host "    $initLine" -ForegroundColor White
+            }
             Write-Host ""
         }
 
@@ -127,7 +138,7 @@ function Invoke-OhMyPoshTheme {
   OPTIONS
     -List              Fetch and show all available themes from GitHub
                        ▶ marks the active theme, ✓ marks locally installed
-    -Install <name>    Download theme and activate it in your profile
+    -Install <name>    Download theme and save it to `$PROFILE
     -h / -Help         Show this help
 
   EXAMPLES

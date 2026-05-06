@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# OMP-Th — Oh My Posh theme manager for Git Bash
+
+THEMES_DIR="$HOME/.config/oh-my-posh"
+RAW_BASE="https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes"
+API_URL="https://api.github.com/repos/JanDeDobbeleer/oh-my-posh/contents/themes"
+SCRIPT_NAME="$(basename "$0")"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+GRAY='\033[0;90m'
+NC='\033[0m'
+
+detect_profile() {
+    if [ -f "$HOME/.bash_profile" ]; then
+        echo "$HOME/.bash_profile"
+    else
+        echo "$HOME/.bashrc"
+    fi
+}
+
+get_current_theme() {
+    local profile
+    profile=$(detect_profile)
+    [ -f "$profile" ] || return
+    grep 'oh-my-posh init bash' "$profile" 2>/dev/null \
+        | grep -oP '/oh-my-posh/\K[^"/ ]+(?=\.omp\.json)' \
+        | tail -1
+}
+
+cmd_list() {
+    echo ""
+    printf "  ${GRAY}Fetching theme list from GitHub...${NC}\n"
+
+    local json
+    json=$(curl -sf -H "User-Agent: OMP-Th" "$API_URL" 2>/dev/null) || {
+        printf "  ${RED}ERROR: Could not reach GitHub API. Check your connection.${NC}\n"
+        return 1
+    }
+
+    local -a themes
+    mapfile -t themes < <(
+        printf '%s\n' "$json" \
+            | grep -oP '"name":\s*"\K[^"]+(?=\.omp\.json")' \
+            | sort
+    )
+
+    if [ ${#themes[@]} -eq 0 ]; then
+        printf "  ${RED}ERROR: No themes found in API response.${NC}\n"
+        return 1
+    fi
+
+    local -a installed=()
+    if [ -d "$THEMES_DIR" ]; then
+        mapfile -t installed < <(
+            find "$THEMES_DIR" -maxdepth 1 -name "*.omp.json" \
+                -exec basename {} .omp.json \; 2>/dev/null | sort
+        )
+    fi
+
+    local current_theme
+    current_theme=$(get_current_theme)
+
+    local total=${#themes[@]}
+    echo ""
+    printf "  ${YELLOW}Oh My Posh — %d themes available${NC}\n" "$total"
+    printf "  ${GRAY}%s${NC}\n" "$(printf '─%.0s' {1..52})"
+    printf "  ${GRAY}▶ = active   ✓ = installed locally   · = not installed${NC}\n"
+    echo ""
+
+    # --- column layout ---
+    local term_width
+    term_width=$(tput cols 2>/dev/null || echo 80)
+
+    local max_len=0
+    local t
+    for t in "${themes[@]}"; do
+        (( ${#t} > max_len )) && max_len=${#t}
+    done
+
+    # 4 chars for "  X " prefix + name + 2 chars gap between columns
+    local col_width=$(( max_len + 6 ))
+    local num_cols=$(( term_width / col_width ))
+    (( num_cols < 1 )) && num_cols=1
+    (( num_cols > 5 )) && num_cols=5
+
+    local col=0
+    for t in "${themes[@]}"; do
+        local is_current=false is_installed=false
+        [ "$t" = "$current_theme" ] && is_current=true
+        local inst
+        for inst in "${installed[@]}"; do
+            [ "$t" = "$inst" ] && is_installed=true && break
+        done
+
+        local icon color
+        if $is_current; then
+            icon="▶"; color="$GREEN"
+        elif $is_installed; then
+            icon="✓"; color="$CYAN"
+        else
+            icon="·"; color="$GRAY"
+        fi
+
+        local padded
+        padded=$(printf "%-${max_len}s" "$t")
+        printf "${color}  %s %s  ${NC}" "$icon" "$padded"
+
+        col=$(( col + 1 ))
+        if (( col >= num_cols )); then
+            echo ""
+            col=0
+        fi
+    done
+    (( col > 0 )) && echo ""
+
+    echo ""
+    printf "  ${GRAY}Install a theme: %s --install <name>${NC}\n" "$SCRIPT_NAME"
+    echo ""
+}
+
+cmd_install() {
+    local theme_name="${1%.omp.json}"
+    local theme_url="$RAW_BASE/$theme_name.omp.json"
+    local theme_path="$THEMES_DIR/$theme_name.omp.json"
+
+    echo ""
+    printf "  ${CYAN}Installing: %s${NC}\n" "$theme_name"
+
+    mkdir -p "$THEMES_DIR"
+
+    local http_code
+    http_code=$(curl -s -o "$theme_path" -w "%{http_code}" "$theme_url")
+
+    if [ "$http_code" != "200" ]; then
+        rm -f "$theme_path"
+        printf "  ${RED}✗ Theme '%s' not found.${NC}\n" "$theme_name"
+        printf "  ${GRAY}  Use --list to browse available themes.${NC}\n"
+        return 1
+    fi
+
+    printf "  ${GREEN}✓ Saved to %s${NC}\n" "$theme_path"
+
+    local profile
+    profile=$(detect_profile)
+    touch "$profile"
+
+    local init_line="eval \"\$(oh-my-posh init bash --config \"\$HOME/.config/oh-my-posh/${theme_name}.omp.json\")\""
+
+    if grep -q 'oh-my-posh init bash' "$profile" 2>/dev/null; then
+        awk -v new="$init_line" '
+            /oh-my-posh init bash/ { print new; next }
+            { print }
+        ' "$profile" > "${profile}.omp-tmp" && mv "${profile}.omp-tmp" "$profile"
+    else
+        printf '\n%s\n' "$init_line" >> "$profile"
+    fi
+
+    # Verify write
+    if ! grep -qF "$theme_name" "$profile" 2>/dev/null; then
+        printf "  ${RED}✗ Could not write to profile: %s${NC}\n" "$profile"
+        printf "  ${GRAY}  Run manually to apply (this session only):${NC}\n"
+        printf "  %s\n" "$init_line"
+        echo ""
+        return 1
+    fi
+
+    printf "  ${GREEN}✓ Profile updated: %s${NC}\n" "$profile"
+    echo ""
+    printf "  ${YELLOW}Reload now: source %s${NC}\n" "$profile"
+    echo ""
+}
+
+cmd_all() {
+    echo ""
+    printf "  ${GRAY}Fetching theme list from GitHub...${NC}\n"
+
+    local json
+    json=$(curl -sf -H "User-Agent: OMP-Th" "$API_URL" 2>/dev/null) || {
+        printf "  ${RED}ERROR: Could not reach GitHub API. Check your connection.${NC}\n"
+        return 1
+    }
+
+    local -a themes
+    mapfile -t themes < <(
+        printf '%s\n' "$json" \
+            | grep -oP '"name":\s*"\K[^"]+(?=\.omp\.json")' \
+            | sort
+    )
+
+    if [ ${#themes[@]} -eq 0 ]; then
+        printf "  ${RED}ERROR: No themes found in API response.${NC}\n"
+        return 1
+    fi
+
+    mkdir -p "$THEMES_DIR"
+
+    local total=${#themes[@]}
+    local ok=0 skipped=0 failed=0
+    local t i=0
+
+    echo ""
+    printf "  ${YELLOW}Downloading %d themes to %s${NC}\n" "$total" "$THEMES_DIR"
+    printf "  ${GRAY}%s${NC}\n" "$(printf '─%.0s' {1..52})"
+    echo ""
+
+    for t in "${themes[@]}"; do
+        i=$(( i + 1 ))
+        local theme_path="$THEMES_DIR/$t.omp.json"
+        local label
+        label=$(printf "[%*d/%d] %s" "${#total}" "$i" "$total" "$t")
+
+        # Skip already downloaded
+        if [ -f "$theme_path" ]; then
+            printf "  ${GRAY}· %-55s (skip)${NC}\n" "$label"
+            skipped=$(( skipped + 1 ))
+            continue
+        fi
+
+        local http_code
+        http_code=$(curl -s -o "$theme_path" -w "%{http_code}" \
+            "$RAW_BASE/$t.omp.json")
+
+        if [ "$http_code" = "200" ]; then
+            printf "  ${GREEN}✓ %-55s${NC}\n" "$label"
+            ok=$(( ok + 1 ))
+        else
+            rm -f "$theme_path"
+            printf "  ${RED}✗ %-55s (HTTP %s)${NC}\n" "$label" "$http_code"
+            failed=$(( failed + 1 ))
+        fi
+    done
+
+    echo ""
+    printf "  ${GRAY}%s${NC}\n" "$(printf '─%.0s' {1..52})"
+    printf "  ${GREEN}✓ Downloaded: %d${NC}  " "$ok"
+    printf "  ${GRAY}· Skipped: %d${NC}  " "$skipped"
+    if (( failed > 0 )); then
+        printf "  ${RED}✗ Failed: %d${NC}" "$failed"
+    fi
+    echo ""
+    printf "  ${GRAY}Themes dir: %s${NC}\n" "$THEMES_DIR"
+    echo ""
+}
+
+cmd_help() {
+    local profile
+    profile=$(detect_profile)
+    cat <<EOF
+
+  OMP-Th  —  Oh My Posh theme manager for Git Bash
+
+  USAGE
+    $SCRIPT_NAME --list
+    $SCRIPT_NAME --install <theme-name>
+    $SCRIPT_NAME --all
+    $SCRIPT_NAME --help
+
+  OPTIONS
+    --list              Fetch and show all available themes from GitHub
+                        ▶ marks the active theme, ✓ marks locally installed
+    --install <name>    Download theme and update shell profile
+    --all               Download all themes to local config dir
+                        (already downloaded themes are skipped)
+    --help              Show this help
+
+  EXAMPLES
+    $SCRIPT_NAME --list
+    $SCRIPT_NAME --install grandpa-style
+    $SCRIPT_NAME --install jandedobbeleer
+    $SCRIPT_NAME --all
+
+  Themes source:  https://github.com/JanDeDobbeleer/oh-my-posh/tree/main/themes
+  Config dir:     $THEMES_DIR
+  Shell profile:  $profile
+
+EOF
+}
+
+# --- entry point ---
+case "${1:-}" in
+    --list)
+        cmd_list
+        ;;
+    --install)
+        if [ -z "${2:-}" ]; then
+            printf "  ${RED}ERROR: --install requires a theme name.${NC}\n"
+            printf "  Usage: %s --install <name>\n" "$SCRIPT_NAME"
+            exit 1
+        fi
+        cmd_install "$2"
+        ;;
+    --all)
+        cmd_all
+        ;;
+    --help|"")
+        cmd_help
+        ;;
+    *)
+        printf "  ${RED}Unknown option: %s${NC}\n" "$1"
+        cmd_help
+        exit 1
+        ;;
+esac
